@@ -1,0 +1,14 @@
+fastapi
+uvicorn
+streamlit
+langchain
+langchain-groq
+sqlalchemy
+gTTS
+groq
+python-dotenv
+pydantic
+plotly
+pandas
+openpyxl
+python-multipart
