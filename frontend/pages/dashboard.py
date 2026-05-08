@@ -237,7 +237,8 @@ def generate_excel_report(complaints_data, summary_text):
 
 # Categorize raw data for charts
 categories = {"Fraud Investigation": [], "Account Services": [], "Loan Support": [], "General Support": []}
-for c in complaints:
+active_complaints = [c for c in complaints if "resolve" not in c.get("status", "Pending").lower()]
+for c in active_complaints:
     cat_full = c.get("category", "General Support Portal")
     if "Fraud" in cat_full: cat = "Fraud Investigation"
     elif "Account" in cat_full: cat = "Account Services"
@@ -248,7 +249,7 @@ for c in complaints:
 counts = {k: len(v) for k, v in categories.items()}
 labels = list(counts.keys())
 values = list(counts.values())
-total_complaints = sum(values)
+active_cases_count = sum(values)
 
 # =========================================================================
 # UI RENDERING
@@ -471,7 +472,7 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
 ])
 
 with tab1:
-    ai_briefing_text = generate_ai_briefing(complaints)
+    ai_briefing_text = generate_ai_briefing(active_complaints)
 
     st.markdown("""
     <div style='background: linear-gradient(145deg, #1d1d23 0%, #16161a 100%); border-left: 4px solid #FF6B00; padding: 20px; border-radius: 8px; margin-bottom: 2rem;'>
@@ -482,7 +483,7 @@ with tab1:
 
     with head_col2:
         st.markdown("<br/>", unsafe_allow_html=True)
-        if total_complaints > 0:
+        if len(complaints) > 0:
             excel_data = generate_excel_report(complaints, ai_briefing_text)
             st.download_button(
                 label="📥 Download Excel Report",
@@ -496,11 +497,11 @@ with tab1:
 
     kpi_col1, kpi_col2, kpi_col3 = st.columns(3)
 
-    critical_count = sum(1 for c in complaints if c.get("urgency") == "Critical")
-    ai_action_count = sum(1 for c in complaints if c.get("action_taken") is not None and str(c.get("action_taken")).lower() != "none")
+    critical_count = sum(1 for c in active_complaints if c.get("urgency") == "Critical")
+    ai_action_count = sum(1 for c in active_complaints if c.get("action_taken") is not None and str(c.get("action_taken")).lower() != "none")
 
     with kpi_col1:
-        st.metric("Total Active Cases", total_complaints)
+        st.metric("Total Active Cases", active_cases_count)
     
     with kpi_col2:
         # Use delta_color='inverse' to make downward changes green/normal changes red based on SLA perspective, 
@@ -515,7 +516,7 @@ with tab1:
 
     with col1:
         st.markdown("### Risk Matrix by Portal")
-        if total_complaints == 0:
+        if active_cases_count == 0:
             st.info("No data available")
         else:
             URGENCY_COLORS = {
@@ -562,7 +563,7 @@ with tab1:
 
     with col2:
         st.markdown("### Volume Over Time")
-        if total_complaints > 0:
+        if active_cases_count > 0:
             dates = pd.date_range(end=pd.Timestamp.today(), periods=30)
             import numpy as np
             np.random.seed(42)
@@ -600,7 +601,7 @@ with tab1:
 
     with col3:
         st.markdown("### Distribution")
-        if total_complaints > 0:
+        if active_cases_count > 0:
             fig_donut = px.pie(
                 names=labels, values=values, hole=0.7, color=labels, color_discrete_map=COLORS
             )
@@ -608,13 +609,13 @@ with tab1:
             fig_donut.update_layout(
                 paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', showlegend=False, height=280,
                 margin=dict(t=0, b=0, l=0, r=0),
-                annotations=[dict(text=f"<span style='color:#FF6B00; font-size:54px; font-weight:bold;'>{total_complaints}</span><span style='color:#A0A0AA;'></span>", x=0.5, y=0.5, showarrow=False)]
+                annotations=[dict(text=f"<span style='color:#FF6B00; font-size:54px; font-weight:bold;'>{active_cases_count}</span><span style='color:#A0A0AA;'></span>", x=0.5, y=0.5, showarrow=False)]
             )
             st.plotly_chart(fig_donut, use_container_width=True)
 
     with col4:
         st.markdown("### Resolution Queue Tracker")
-        if total_complaints > 0:
+        if len(complaints) > 0:
             status_counts = {"Pending": 0, "Resolved": 0}
             for c in complaints:
                 s_val = c.get("status", "Pending")
