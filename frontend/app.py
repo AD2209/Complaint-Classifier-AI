@@ -3,6 +3,7 @@ import os
 import requests
 import json
 import tempfile
+import re
 from gtts import gTTS
 from dotenv import load_dotenv
 
@@ -260,6 +261,7 @@ User's new message:
 {user_input}
 
 Task 1: Extract any new details provided in the user's message and merge them with the current details. If a piece of information is still missing, keep it as null.
+For the Mobile Number, ensure it is a valid phone number containing digits. If the user provides a random word or invalid number, keep it as null.
 Task 2: If any details are still missing, formulate a polite question asking the user for ONE of the missing details.
 Task 3: If all details are collected, your next_question should be exactly: "ALL_DETAILS_COLLECTED".
 
@@ -340,7 +342,21 @@ def transcribe_audio(audio_bytes):
         os.remove(temp_name)
         lang = getattr(transcription, "language", "en")
         if not lang: lang = "en"
-        return transcription.text, lang
+        
+        text = transcription.text
+        
+        # If Whisper detects Urdu, translate it to Hindi Devanagari
+        if lang == "ur" or "urdu" in lang.lower():
+            try:
+                llm = ChatGroq(temperature=0, model_name="llama-3.3-70b-versatile")
+                prompt = PromptTemplate.from_template("Translate the following text to Hindi (Devanagari script) ONLY. Do not output anything else:\n\n{text}")
+                chain = prompt | llm | StrOutputParser()
+                text = chain.invoke({"text": text}).strip()
+                lang = "hi"
+            except Exception as e:
+                print("Translation error:", e)
+                
+        return text, lang
     except Exception as e:
         print("Transcription Exception:", e)
         return f"Error transcribing audio: {str(e)}", "en"
@@ -426,87 +442,94 @@ if raw_input:
         
     response_text = ""
 
-    # Flow Management
-    if st.session_state.flow_state == "idle":
-        intent = get_intent(raw_input)
-        if intent == "file_complaint":
-            response_text = "I'd be happy to help you file a complaint. How would you like to provide your details?"
-            st.session_state.flow_state = "awaiting_filing_choice"
-        elif intent == "retrieve_complaint":
-            response_text = "Sure, I can help you check the status of your complaint. Please enter your Complaint Reference ID (e.g., REF-1234ABCD)."
-            st.session_state.flow_state = "awaiting_complaint_id"
-        else:
-            # Handle "general_query" and "unrelated" conversational chat via normal LLM
-            response_text = generate_chat_response(raw_input)
-            
-    elif st.session_state.flow_state == "awaiting_filing_choice":
-        # Form logic happens outside chat message loop
-        pass
-        
-    elif st.session_state.flow_state == "awaiting_complaint_form":
-        # Form logic happens outside chat message loop
-        pass
-        
-    elif st.session_state.flow_state == "collecting_complaint_details":
-        new_data, next_question = handle_conversational_extraction(
-            raw_input, 
-            st.session_state.complaint_data, 
-            st.session_state.user_language
-        )
-        st.session_state.complaint_data = new_data
-        
-        if next_question == "ALL_DETAILS_COLLECTED":
-            with st.spinner("Submitting your complaint..."):
-                try:
-                    # Upload conversational attachment if exists
-                    attachment_path = None
-                    if "chat_attachment" in st.session_state and st.session_state.chat_attachment:
-                        upload_res = requests.post(f"{API_URL}/upload/", files={"file": (st.session_state.chat_attachment.name, st.session_state.chat_attachment, st.session_state.chat_attachment.type)})
-                        if upload_res.status_code == 200:
-                            attachment_path = upload_res.json().get("attachment_path")
-                            
-                    formatted_details = f"Name: {new_data['name']}, Account: {new_data['account_number']}, Mobile: {new_data['mobile']}"
-                    payload = {
-                        "user_details": formatted_details,
-                        "description": new_data['description'],
-                        "attachment_path": attachment_path
-                    }
-                    res = requests.post(f"{API_URL}/complaints/", json=payload, timeout=15)
-                    if res.status_code == 200:
-                        data = res.json()
-                        response_text = f"Your complaint has been successfully filed under the category **{data['category']}**.\n\nYour Reference ID is: **{data['id']}**.\n\nPlease keep this ID safe."
-                        urgency = data.get("urgency", "Low")
-                        if urgency in ["High", "Critical"]: response_text += f"\n\n⚠️ **Urgency Level: {urgency}** - This issue has been prioritized."
-                        action_taken = data.get("action_taken")
-                        if action_taken and action_taken.lower() != "none": response_text += f"\n\n🚨 **Agent Action Completed:** {action_taken}"
-                        advice = data.get("advice")
-                        if advice: response_text += f"\n\n💡 **Next Steps / Advice:**\n{advice}"
-                    elif res.status_code == 400:
-                        data = res.json()
-                        response_text = f"**Complaint Rejected.**\n{data.get('detail', 'Your request could not be processed.')}"
-                    else:
-                        response_text = "I'm sorry, there was an issue filing your complaint. Please try again later."
-                except Exception as e:
-                    response_text = f"Could not connect to the backend server. Error: {e}"
-            st.session_state.flow_state = "idle"
-            st.session_state.complaint_data = {"name": None, "account_number": None, "mobile": None, "description": None}
-            st.session_state.chat_attachment = None
-        else:
-            response_text = next_question
-        
-    elif st.session_state.flow_state == "awaiting_complaint_id":
-        complaint_id = raw_input.strip()
-        try:
-            res = requests.get(f"{API_URL}/complaints/{complaint_id}", timeout=10)
-            if res.status_code == 200:
-                data = res.json()
-                response_text = f"Here are the details for your complaint: \n- **ID**: {data['id']}\n- **Category**: {data['category']}\n- **Status**: {data['status']}\n- **Description**: {data['description']}"
-            else:
-                response_text = "I couldn't find a complaint with that ID. Please check and try again."
-        except Exception as e:
-            response_text = f"Could not connect to the backend server. Error: {e}"
-            
+    # Check for cancellation
+    cancel_keywords = ["exit", "cancel", "abort", "stop", "no complaint", "nevermind", "quit"]
+    if st.session_state.flow_state != "idle" and any(k in raw_input.lower().strip() for k in cancel_keywords):
         st.session_state.flow_state = "idle"
+        st.session_state.complaint_data = {"name": None, "account_number": None, "mobile": None, "description": None}
+        response_text = "Okay, I've cancelled the current process. How else can I help you today?"
+    else:
+        # Flow Management
+        if st.session_state.flow_state == "idle":
+            intent = get_intent(raw_input)
+            if intent == "file_complaint":
+                response_text = "I'd be happy to help you file a complaint. How would you like to provide your details?"
+                st.session_state.flow_state = "awaiting_filing_choice"
+            elif intent == "retrieve_complaint":
+                response_text = "Sure, I can help you check the status of your complaint. Please enter your Complaint Reference ID (e.g., REF-1234ABCD)."
+                st.session_state.flow_state = "awaiting_complaint_id"
+            else:
+                # Handle "general_query" and "unrelated" conversational chat via normal LLM
+                response_text = generate_chat_response(raw_input)
+                
+        elif st.session_state.flow_state == "awaiting_filing_choice":
+            # Form logic happens outside chat message loop
+            pass
+            
+        elif st.session_state.flow_state == "awaiting_complaint_form":
+            # Form logic happens outside chat message loop
+            pass
+            
+        elif st.session_state.flow_state == "collecting_complaint_details":
+            new_data, next_question = handle_conversational_extraction(
+                raw_input, 
+                st.session_state.complaint_data, 
+                st.session_state.user_language
+            )
+            st.session_state.complaint_data = new_data
+            
+            if next_question == "ALL_DETAILS_COLLECTED":
+                with st.spinner("Submitting your complaint..."):
+                    try:
+                        # Upload conversational attachment if exists
+                        attachment_path = None
+                        if "chat_attachment" in st.session_state and st.session_state.chat_attachment:
+                            upload_res = requests.post(f"{API_URL}/upload/", files={"file": (st.session_state.chat_attachment.name, st.session_state.chat_attachment, st.session_state.chat_attachment.type)})
+                            if upload_res.status_code == 200:
+                                attachment_path = upload_res.json().get("attachment_path")
+                                
+                        formatted_details = f"Name: {new_data['name']}, Account: {new_data['account_number']}, Mobile: {new_data['mobile']}"
+                        payload = {
+                            "user_details": formatted_details,
+                            "description": new_data['description'],
+                            "attachment_path": attachment_path
+                        }
+                        res = requests.post(f"{API_URL}/complaints/", json=payload, timeout=15)
+                        if res.status_code == 200:
+                            data = res.json()
+                            response_text = f"Your complaint has been successfully filed under the category **{data['category']}**.\n\nYour Reference ID is: **{data['id']}**.\n\nPlease keep this ID safe."
+                            urgency = data.get("urgency", "Low")
+                            if urgency in ["High", "Critical"]: response_text += f"\n\n⚠️ **Urgency Level: {urgency}** - This issue has been prioritized."
+                            action_taken = data.get("action_taken")
+                            if action_taken and action_taken.lower() != "none": response_text += f"\n\n🚨 **Agent Action Completed:** {action_taken}"
+                            advice = data.get("advice")
+                            if advice: response_text += f"\n\n💡 **Next Steps / Advice:**\n{advice}"
+                        elif res.status_code == 400:
+                            data = res.json()
+                            response_text = f"**Complaint Rejected.**\n{data.get('detail', 'Your request could not be processed.')}"
+                        else:
+                            response_text = "I'm sorry, there was an issue filing your complaint. Please try again later."
+                    except Exception as e:
+                        response_text = f"Could not connect to the backend server. Error: {e}"
+                st.session_state.flow_state = "idle"
+                st.session_state.complaint_data = {"name": None, "account_number": None, "mobile": None, "description": None}
+                st.session_state.chat_attachment = None
+            else:
+                response_text = next_question
+            
+        elif st.session_state.flow_state == "awaiting_complaint_id":
+            complaint_id = raw_input.strip()
+            try:
+                res = requests.get(f"{API_URL}/complaints/{complaint_id}", timeout=10)
+                if res.status_code == 200:
+                    data = res.json()
+                    response_text = f"Here are the details for your complaint: \n- **ID**: {data['id']}\n- **Category**: {data['category']}\n- **Status**: {data['status']}\n- **Description**: {data['description']}"
+                else:
+                    response_text = "I couldn't find a complaint with that ID. Please check and try again."
+            except Exception as e:
+                response_text = f"Could not connect to the backend server. Error: {e}"
+                
+            st.session_state.flow_state = "idle"
 
     # Generate TTS audio
     audio_path = None
@@ -550,6 +573,8 @@ if st.session_state.flow_state == "awaiting_complaint_form":
             if submit_btn:
                 if not f_name or not f_account or not f_mobile or not f_desc:
                     st.error("Please fill in all the fields before submitting.")
+                elif not re.match(r'^\+?[\d\s-]{8,15}$', f_mobile):
+                    st.error("Please enter a valid mobile number (e.g., 10 digits).")
                 else:
                     try:
                         attachment_path = None
@@ -581,6 +606,7 @@ if st.session_state.flow_state == "awaiting_complaint_form":
                                 st.session_state.messages.append({"role": "assistant", "content": action_msg})
 
                             # Display advice if present
+                            advice = data.get("advice")
                             if advice:
                                 st.session_state.messages.append({"role": "assistant", "content": f"💡 **Next Steps / Advice:**\n{advice}"})
                                 
